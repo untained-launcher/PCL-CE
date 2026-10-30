@@ -26,8 +26,7 @@ public static partial class DownloadUi
                          .loaderTaskbar
                          .ToList()
                          .Where(ongoingLoader =>
-                             ongoingLoader.name
-                             == Lang.Text("Minecraft.Download.Stage.MinecraftDownload", id)))
+                             ongoingLoader.Identifier == McDownloadStageId(id)))
             {
                 if (behaviour == NetPreDownloadBehaviour.ExitWhileExistsOrDownloading)
                     return (Loading.LoaderCombo<string>)ongoingLoader;
@@ -64,7 +63,8 @@ public static partial class DownloadUi
                 McDownloadClientLoader(id, jsonUrl)
             )
             {
-                OnStateChanged = McInstallState
+                OnStateChanged = McInstallState,
+                Identifier = McDownloadStageId(id)
             };
             loader.Start(versionFolder);
             Loading.LoaderTaskbarAdd(loader);
