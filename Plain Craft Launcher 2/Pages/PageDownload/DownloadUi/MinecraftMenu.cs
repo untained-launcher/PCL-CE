@@ -189,7 +189,7 @@ public static partial class DownloadUi
                         new DownloadFile(
                             GameDownload.DlSourceLauncherOrMetaGet(jsonUrl),
                             Path.Combine(versionFolder, $"{id}.json"),
-                            new Common.FileChecker(canUseExistsFile: false, isJson: true)
+                            new FileChecker(canUseExistsFile: false, isJson: true)
                         )
                     ]
                 )

@@ -528,7 +528,7 @@ public partial class PageInstanceOverall : IPageView
                 PageInstanceLeft.McInstance.PathInstance + @"PCLInstallBackups\" + PageInstanceLeft.McInstance.Name +
                 ".jar");
             // 提交安装申请
-            var request = new DownloadUi.McInstallRequest
+            var request = new McInstallRequest
             {
                 targetInstanceName = PageInstanceLeft.McInstance.Name,
                 targetInstanceFolder = $@"{GameFolders.mcFolderSelected}versions\{PageInstanceLeft.McInstance.Name}\",
