@@ -2413,8 +2413,6 @@
 
     <!-- Region -->
 
-    <sys:String x:Key="Region.Feature.Unknown">无法获取区域信息，暂时无法使用 Minecraft 下载、补全与整合包安装功能。</sys:String>
-
     <!-- Select -->
 
     <sys:String x:Key="Select.Error.OperationFailed">实例选择操作失败。请查看错误详情。</sys:String>
