@@ -9,9 +9,11 @@
 #   2. 仅修改 .github/workflows/ 的提交 -> 跳过（本 fork 使用自己的 CI）。
 #
 # 被剔除功能文件 / 标记不再整条跳过：提交的正常部分要进，剔除部分在应用后的
-# 「净化」步骤剥掉——暂存区里出现的标记行必然来自本次 cherry-pick（fork 的
-# HEAD 永远不含被剔除内容，由 check-policy 把关），全部剥除是安全的；净化后
-# 再跑一次 check-policy 兜底，仍不过则回退该提交并记入跳过清单。
+# 「净化」步骤剥掉。净化为结果导向——不预判提交是否触及，而是在每次 commit 前
+# 直接扫描暂存区：被剔除内容可能来自提交自身的新增，也可能来自冲突裁决时
+# 「取上游版本」整文件恢复。只扫描源码扩展名，避免误剥 AGENTS.md / scripts
+# 中合法出现的文件名引用；fork 的 HEAD 永远不含被剔除内容（check-policy 把关），
+# 暂存区里出现的标记行必然来自本次应用，全部剥除安全。
 #
 # 冲突分级裁决（绝不因单个提交让同步停摆）：
 #   1. 冲突文件属于被剔除功能 -> 保留删除状态；
@@ -137,24 +139,11 @@ for commit in "${COMMITS[@]}"; do
     continue
   fi
 
-  # 被剔除功能文件 / 标记不再整条跳过：提交的正常部分要进，剔除部分在
-  # 应用后的「净化」步骤剥掉。先判断本提交是否需要净化。
-  # 注意：grep -q 会提前退出，在 pipefail 下让上游 grep 收到 SIGPIPE 而
-  # 误判为不匹配；这里先把新增行取到变量，再用 grep -c 计数判断。
-  needs_purify=0
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    if in_list "$path" "${EXCLUDED_FILES[@]}"; then
-      needs_purify=1
-      break
-    fi
-  done <<< "$changed_paths"
-  if [ "$needs_purify" -eq 0 ]; then
-    changed_lines=$(git show --unified=0 "$commit" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' || true)
-    hits=$(printf '%s\n' "$changed_lines" | grep -cE "$EXCLUDED_PATTERN" || true)
-    if [ "${hits:-0}" -gt 0 ]; then
-      needs_purify=1
-    fi
+  # 本 fork 使用自己的 CI，上游仅改工作流的提交没有同步价值。
+  if [[ -n "$changed_paths" ]] && ! grep -qvE '^\.github/workflows/' <<< "$changed_paths"; then
+    log "跳过仅修改工作流的上游提交 $short $subject"
+    SKIPPED=$((SKIPPED + 1))
+    continue
   fi
 
   # 本 fork 使用自己的 CI，上游仅改工作流的提交没有同步价值。
@@ -201,29 +190,33 @@ for commit in "${COMMITS[@]}"; do
     continue
   fi
 
-  # 净化：剥掉本次应用带入的被剔除内容，保留提交的正常部分。
-  # fork 的 HEAD 永远不含被剔除内容（check-policy 把关），因此暂存区里
-  # 出现的标记行必然来自本次 cherry-pick，全部剥除是安全的。
-  if [ "$needs_purify" -eq 1 ]; then
-    for path in "${EXCLUDED_FILES[@]}"; do
-      git rm -q --cached --ignore-unmatch -- "$path" 2>/dev/null || true
-    done
-    while IFS= read -r path; do
-      [ -n "$path" ] || continue
-      staged=$(git show ":${path}" 2>/dev/null || true)
-      hits=$(printf '%s\n' "$staged" | grep -cE "$EXCLUDED_PATTERN" || true)
-      if [ "${hits:-0}" -gt 0 ]; then
-        log "剥离 $path 中的被剔除功能标记行"
-        printf '%s\n' "$staged" | grep -vE "$EXCLUDED_PATTERN" > "$path" || true
-        git add -- "$path"
-      fi
-    done < <(git diff --cached --name-only --diff-filter=ACM)
-    if git diff --cached --quiet; then
-      log "提交 $short 净化后为空，跳过"
-      git reset --hard HEAD >/dev/null
-      SKIPPED=$((SKIPPED + 1))
-      continue
+  # 净化（结果导向，不依赖 diff 预判）：无论被剔除内容来自提交自身的新增、
+  # 还是冲突裁决时「取上游版本」整文件恢复带来的，只要暂存区里有就剥掉。
+  # 只扫描源码扩展名，避免误剥 AGENTS.md / scripts 中合法出现的文件名引用。
+  # fork 的 HEAD 永远不含被剔除内容（check-policy 把关），因此暂存区里出现的
+  # 标记行必然来自本次应用，全部剥除是安全的。
+  purged=0
+  for path in "${EXCLUDED_FILES[@]}"; do
+    if git ls-files --cached --error-unmatch "$path" >/dev/null 2>&1; then
+      log "移除暂存区中的被剔除功能文件: $path"
+      git rm -q -f --ignore-unmatch -- "$path"
+      purged=1
     fi
+  done
+  marked=$(git grep --cached -lE "$EXCLUDED_PATTERN" -- '*.cs' '*.xaml' 2>/dev/null || true)
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    log "剥离 $path 中的被剔除功能标记行"
+    staged=$(git show ":${path}" 2>/dev/null || true)
+    printf '%s\n' "$staged" | grep -vE "$EXCLUDED_PATTERN" > "$path" || true
+    git add -- "$path"
+    purged=1
+  done <<< "$marked"
+  if [ "$purged" -ne 0 ] && git diff --cached --quiet; then
+    log "提交 $short 净化后为空，跳过"
+    git reset --hard HEAD >/dev/null
+    SKIPPED=$((SKIPPED + 1))
+    continue
   fi
 
   # -C 保留原作者与提交信息；这里不加 -x，避免把上游提交哈希写进信息。
@@ -231,7 +224,7 @@ for commit in "${COMMITS[@]}"; do
   git -c commit.gpgsign=false commit -C "$commit" --no-verify >/dev/null
   APPLIED=$((APPLIED + 1))
 
-  if [ "$needs_purify" -eq 1 ]; then
+  if [ "$purged" -ne 0 ]; then
     if ! ./scripts/check-policy.sh; then
       log "提交 $short 净化后仍违反策略，回退并跳过"
       git reset --hard HEAD~1 >/dev/null
