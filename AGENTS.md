@@ -84,9 +84,10 @@
 
 ## 5. CI 结构
 
-- `.github/workflows/sync.yml`：每 6 小时 + 手动触发。只拉取上游并按基线 cherry-pick，
-  推送后**不再触发构建**；失败，或有上游提交因冲突被跳过时，自动创建 / 更新对应
-  Issue，附运行链接、跳过清单与日志摘录。手动触发可填 `replay_from` 按需重放。
+- `.github/workflows/sync.yml`：每 6 小时 + 手动触发。只拉取上游并按基线 cherry-pick；
+  失败，或有上游提交因冲突被跳过时，自动创建 / 更新对应 Issue，附运行链接、跳过清单与
+  日志摘录。手动触发可填 `replay_from` 按需重放。本次同步剥过去除的被剔除功能代码时，
+  推送后自动调用一次 `build.yml` 验证编译。
 - `.github/workflows/build.yml`：PR、手动触发，以及被 `release.yml` 复用调用。
   不再在每次 push `dev` 时构建；先跑策略检查，再矩阵构建 x64 / ARM64。
   失败时自动创建 / 更新 Issue（PR 除外），附失败任务和日志摘录。
@@ -97,7 +98,9 @@
   上传 `PCL2_CE_<config|nightly>_<arch>.exe` 和 `SHA256SUMS`；
   release notes 由 `git-cliff` 生成，失败时自动创建 / 更新 Issue。
 - 自动构建频率：每周两次计划 Nightly + 发布 tag / 手动发布；PR 只跑策略检查、不构建；
-  上游同步不触发构建。没有新 commit（HEAD 已成功发布）时计划构建直接跳过。
+  上游同步不触发构建——但本次同步剥过去除的被剔除功能代码（净化）时，会自动调用一次
+  `build.yml` 验证编译，防止行级剥离破坏代码结构；失败由 `build.yml` 开 Issue。
+  没有新 commit（HEAD 已成功发布）时计划构建直接跳过。
 - 发布方式：Actions → `Release` → Run workflow，填 `vX.Y.Z` 并选 `Release` / `Beta`；
   或推送一个无签名 tag。`Beta` 自动标记为 prerelease。
 - 旧的 `release-publish.yml`、`mirrorchyan_*.yml`、`reusable-build.yml` 已移除；

@@ -113,6 +113,7 @@ if [[ "$STATE_BASE" == "$UPSTREAM_SHA" ]]; then
     echo "changed=false" >> "$GITHUB_OUTPUT"
     echo "skipped=0" >> "$GITHUB_OUTPUT"
     echo "needs_attention=false" >> "$GITHUB_OUTPUT"
+    echo "purified=0" >> "$GITHUB_OUTPUT"
   fi
   exit 0
 fi
@@ -128,6 +129,7 @@ log "待处理 ${#COMMITS[@]} 个上游提交（${STATE_BASE:0:12}..${UPSTREAM_S
 
 APPLIED=0
 SKIPPED=0
+PURIFIED=0
 for commit in "${COMMITS[@]}"; do
   subject="$(git show -s --format=%s "$commit")"
   short="${commit:0:12}"
@@ -201,6 +203,8 @@ for commit in "${COMMITS[@]}"; do
       log "移除暂存区中的被剔除功能文件: $path"
       git rm -q -f --ignore-unmatch -- "$path"
       purged=1
+    PURIFIED=$((PURIFIED + 1))
+      PURIFIED=$((PURIFIED + 1))
     fi
   done
   marked=$(git grep --cached -lE "$EXCLUDED_PATTERN" -- '*.cs' '*.xaml' 2>/dev/null || true)
@@ -211,6 +215,7 @@ for commit in "${COMMITS[@]}"; do
     printf '%s\n' "$staged" | grep -vE "$EXCLUDED_PATTERN" > "$path" || true
     git add -- "$path"
     purged=1
+    PURIFIED=$((PURIFIED + 1))
   done <<< "$marked"
   if [ "$purged" -ne 0 ] && git diff --cached --quiet; then
     log "提交 $short 净化后为空，跳过"
@@ -264,7 +269,7 @@ fi
 
 ./scripts/check-policy.sh
 
-log "完成：应用 $APPLIED 个，跳过 $SKIPPED 个，HEAD $(git rev-parse --short HEAD)"
+log "完成：应用 $APPLIED 个，跳过 $SKIPPED 个，净化 $PURIFIED 处，HEAD $(git rev-parse --short HEAD)"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   if (( APPLIED > 0 )); then
@@ -273,10 +278,12 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "changed=false" >> "$GITHUB_OUTPUT"
   fi
   echo "skipped=$SKIPPED" >> "$GITHUB_OUTPUT"
+  echo "purified=$PURIFIED" >> "$GITHUB_OUTPUT"
   if (( SKIPPED > 0 )); then
     echo "needs_attention=true" >> "$GITHUB_OUTPUT"
   else
     echo "needs_attention=false" >> "$GITHUB_OUTPUT"
+    echo "purified=0" >> "$GITHUB_OUTPUT"
   fi
 fi
 

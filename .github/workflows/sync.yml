@@ -104,3 +104,12 @@ jobs:
           else
             gh issue create --repo "$REPO" --title "$TITLE" --body-file report.md
           fi
+
+      # 本次同步剥过去除的被剔除功能代码时，行级剥离可能破坏代码结构
+      # （如留下不完整的类型）。此时自动跑一次构建验证；失败由 build.yml
+      # 创建 / 更新 Issue。未发生净化的同步不触发构建。
+      - name: Verify build after purification
+        if: ${{ steps.sync.outputs.purified != '' && steps.sync.outputs.purified != '0' }}
+        uses: ./.github/workflows/build.yml
+        with:
+          configuration: CI
