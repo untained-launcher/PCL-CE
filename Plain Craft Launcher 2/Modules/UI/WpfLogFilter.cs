@@ -15,9 +15,12 @@ public sealed class WpfLogFilter : ILogFilter
 
 public sealed class WpfRestrictedFeatures : IRestrictedFeatures
 {
+    // 本 fork 不实行地区功能限制：桩实现令所有检查恒不放行。
+    public bool IsRestricted => false;
 
     public bool Check(string feature)
     {
+        return false;
     }
 
     public void ThrowIfRestricted(string feature)
