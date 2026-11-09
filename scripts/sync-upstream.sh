@@ -4,19 +4,25 @@
 # 做法：按 .github/upstream-sync-base 记录的上游基线逐条 cherry-pick，
 # 推送前运行 scripts/check-policy.sh，失败则不推送。
 #
-# 剔除判定（逐条评估，命中即跳过）：
-#   1. 被剔除提交本身、改动被剔除功能文件的提交；
-#   2. 新增行引入被剔除功能内容（本地化键、调用点等）的提交；
-#   3. 仅修改 .github/workflows/ 的提交（本 fork 使用自己的 CI）。
+# 剔除判定（逐条评估）：
+#   1. 被剔除提交本身 -> 跳过；
+#   2. 仅修改 .github/workflows/ 的提交 -> 跳过（本 fork 使用自己的 CI）。
+#
+# 被剔除功能文件 / 标记不再整条跳过：提交的正常部分要进，剔除部分在应用后的
+# 「净化」步骤剥掉——暂存区里出现的标记行必然来自本次 cherry-pick（fork 的
+# HEAD 永远不含被剔除内容，由 check-policy 把关），全部剥除是安全的；净化后
+# 再跑一次 check-policy 兜底，仍不过则回退该提交并记入跳过清单。
 #
 # 冲突分级裁决（绝不因单个提交让同步停摆）：
 #   1. 冲突文件属于被剔除功能 -> 保留删除状态；
-#   2. 其余冲突 -> 跳过整条提交，记入 .github/upstream-sync-skipped.txt
-#      供人工审计，基线照常推进。
-# diff 触及被剔除功能标记的提交，应用后再跑一次策略检查兜底。
+#   2. 其余冲突 -> 冲突段取上游（fork 的源码没有自有内容，自有改动只在
+#      .github / AGENTS.md / scripts）。
+#
+# FROM=<上游 SHA> 可按需重放：补放被跳过 / 漏处理的提交，基线仍由脚本推进。
 #
 # 用法：
 #   ./scripts/sync-upstream.sh                 # 同步并推送 origin/dev
+#   FROM=<sha> ./scripts/sync-upstream.sh      # 从指定上游提交起重放
 #   DRY_RUN=1 ./scripts/sync-upstream.sh       # 演练：提交到当前分支但不推送
 #   PUSH=0 ./scripts/sync-upstream.sh          # 本地提交但不推送
 set -euo pipefail
@@ -27,6 +33,9 @@ TARGET_BRANCH="${TARGET_BRANCH:-dev}"
 FORBIDDEN_COMMIT="${FORBIDDEN_COMMIT:-8cd9d37491f08e1f8365622517aefed429b5e095}"
 STATE_FILE="${STATE_FILE:-.github/upstream-sync-base}"
 SKIPPED_FILE="${SKIPPED_FILE:-.github/upstream-sync-skipped.txt}"
+# FROM：显式重放起点（上游 SHA），用于按需补放被跳过 / 漏处理的提交。
+# 不改变基线的维护方式——仍由脚本在处理完后推进。
+FROM="${FROM:-}"
 DRY_RUN="${DRY_RUN:-0}"
 PUSH="${PUSH:-1}"
 
@@ -80,7 +89,10 @@ git fetch --no-tags "$UPSTREAM_URL" \
 UPSTREAM_REF="refs/remotes/upstream/${UPSTREAM_BRANCH}"
 UPSTREAM_SHA="$(git rev-parse "$UPSTREAM_REF")"
 
-if [[ -f "$STATE_FILE" ]]; then
+if [[ -n "$FROM" ]]; then
+  STATE_BASE="$FROM"
+  log "使用显式重放起点 $FROM"
+elif [[ -f "$STATE_FILE" ]]; then
   STATE_BASE="$(tr -d '[:space:]' < "$STATE_FILE")"
 else
   STATE_BASE="$(git merge-base HEAD "$UPSTREAM_REF")"
@@ -125,28 +137,21 @@ for commit in "${COMMITS[@]}"; do
     continue
   fi
 
-  # 上游若改写提交哈希，仍按新增文件识别被剔除的功能。
-  excluded_hit=0
+  # 被剔除功能文件 / 标记不再整条跳过：提交的正常部分要进，剔除部分在
+  # 应用后的「净化」步骤剥掉。先判断本提交是否需要净化。
+  needs_purify=0
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if in_list "$path" "${EXCLUDED_FILES[@]}"; then
-      excluded_hit=1
+      needs_purify=1
       break
     fi
   done <<< "$changed_paths"
-  if [ "$excluded_hit" -ne 0 ]; then
-    log "跳过被剔除功能的相关提交 $short $subject"
-    SKIPPED=$((SKIPPED + 1))
-    continue
-  fi
-
-  # 新增行引入被剔除功能的内容（本地化键、调用点等）时跳过：
-  # 文件检测拦不住只在内容里引用被剔除功能的提交。
-  added_lines=$(git show --unified=0 "$commit" | grep '^+' | grep -v '^+++' || true)
-  if grep -qE "$EXCLUDED_PATTERN" <<< "$added_lines"; then
-    log "跳过引入被剔除功能内容的提交 $short $subject"
-    SKIPPED=$((SKIPPED + 1))
-    continue
+  if [ "$needs_purify" -eq 0 ]; then
+    if git show --unified=0 "$commit" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+       | grep -qE "$EXCLUDED_PATTERN"; then
+      needs_purify=1
+    fi
   fi
 
   # 本 fork 使用自己的 CI，上游仅改工作流的提交没有同步价值。
@@ -156,37 +161,22 @@ for commit in "${COMMITS[@]}"; do
     continue
   fi
 
-  # diff 触及被剔除功能标记（含纯删除）的提交，应用后再跑一次策略检查，
-  # 防止合并意外把被剔除内容带进 fork。
-  needs_policy_check=0
-  if git show --unified=0 "$commit" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
-     | grep -qE "$EXCLUDED_PATTERN"; then
-    needs_policy_check=1
-  fi
-
   log "应用 $short $subject"
   if ! git cherry-pick --no-commit "$commit"; then
-    # 分级裁决：被剔除功能文件的冲突保留删除状态；其余冲突跳过整条提交
-    # 并记录到 .github/upstream-sync-skipped.txt，绝不因单个提交停摆。
+    # 分级裁决：被剔除功能文件的冲突保留删除状态；其余冲突取上游段。
+    # fork 的自有内容只在 .github / AGENTS.md / scripts，源码文件没有自有
+    # 改动，取上游不会丢 fork 内容，却能让大重构这类提交顺利应用。
     conflicts=$(git diff --name-only --diff-filter=U)
-    unexpected=0
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       if in_list "$path" "${EXCLUDED_FILES[@]}"; then
         log "冲突文件属于被剔除功能，保留删除: $path"
         git rm -q -f --ignore-unmatch -- "$path"
       else
-        printf '未预期冲突文件：%s\n' "$path" >&2
-        unexpected=1
+        log "冲突取上游段: $path"
+        take_theirs_hunks "$path" && git add -- "$path"
       fi
     done <<< "$conflicts"
-    if [ "$unexpected" -ne 0 ]; then
-      log "跳过 $short $subject：冲突发生在被剔除功能之外的文件"
-      SKIPPED=$((SKIPPED + 1))
-      SKIPPED_COMMITS+=("$commit")
-      git cherry-pick --abort >/dev/null 2>&1 || git reset -q --hard HEAD
-      continue
-    fi
   fi
 
   if git diff --cached --quiet; then
@@ -196,15 +186,38 @@ for commit in "${COMMITS[@]}"; do
     continue
   fi
 
+  # 净化：剥掉本次应用带入的被剔除内容，保留提交的正常部分。
+  # fork 的 HEAD 永远不含被剔除内容（check-policy 把关），因此暂存区里
+  # 出现的标记行必然来自本次 cherry-pick，全部剥除是安全的。
+  if [ "$needs_purify" -eq 1 ]; then
+    for path in "${EXCLUDED_FILES[@]}"; do
+      git rm -q --cached --ignore-unmatch -- "$path" 2>/dev/null || true
+    done
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      if git show ":${path}" 2>/dev/null | grep -qE "$EXCLUDED_PATTERN"; then
+        log "剥离 $path 中的被剔除功能标记行"
+        git show ":${path}" | grep -vE "$EXCLUDED_PATTERN" > "$path" || true
+        git add -- "$path"
+      fi
+    done < <(git diff --cached --name-only --diff-filter=ACM)
+    if git diff --cached --quiet; then
+      log "提交 $short 净化后为空，跳过"
+      git reset --hard HEAD >/dev/null
+      SKIPPED=$((SKIPPED + 1))
+      continue
+    fi
+  fi
+
   # -C 保留原作者与提交信息；这里不加 -x，避免把上游提交哈希写进信息。
   # 显式关闭签名，避免本机全局 commit.gpgsign=true 把真实密钥带进匿名提交。
   git -c commit.gpgsign=false commit -C "$commit" --no-verify >/dev/null
   APPLIED=$((APPLIED + 1))
 
-  if [ "$needs_policy_check" -eq 1 ]; then
+  if [ "$needs_purify" -eq 1 ]; then
     if ! ./scripts/check-policy.sh; then
-      log "提交 $short 应用后违反策略，回退并跳过"
-      git reset -q --hard HEAD~1
+      log "提交 $short 净化后仍违反策略，回退并跳过"
+      git reset --hard HEAD~1 >/dev/null
       SKIPPED=$((SKIPPED + 1))
       SKIPPED_COMMITS+=("$commit")
       continue
