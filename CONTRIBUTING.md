@@ -1,11 +1,5 @@
 # 如何为项目做贡献
 
-> 本 fork 的匿名与提交约束以 [`AGENTS.md`](AGENTS.md) 为准：禁止添加
-> `Assisted-by`、`Co-Authored-By` 等署名 trailer，也不得使用真实身份。
-> 若本机全局开启了提交签名，请使用 `git -c commit.gpgsign=false commit ...`；
-> 匿名提交不应绑定真实 GPG / SSH 密钥。
-> 下文关于向上游提交时使用 `Co-authored` 的说明不适用于本 fork。
-
 Wiki 页面:
 [开发指南](https://github.com/PCL-Community/PCL2-CE/wiki/开发指南)
 [技术规范](https://github.com/PCL-Community/PCL2-CE/wiki/技术规范)

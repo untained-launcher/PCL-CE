@@ -29,6 +29,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sync upstream
+        id: sync
         env:
           SYNC_GIT_NAME: ${{ vars.SYNC_GIT_NAME }}
           SYNC_GIT_EMAIL: ${{ vars.SYNC_GIT_EMAIL }}
@@ -36,38 +37,62 @@ jobs:
           set -o pipefail
           ./scripts/sync-upstream.sh 2>&1 | tee sync.log
 
-      - name: Create or update failure issue
-        if: failure()
+      # 失败，或有上游提交因冲突被跳过（脚本不再让同步停摆，改为跳过并记录），
+      # 都自动创建 / 更新对应 Issue。仓库需启用 Issues。
+      - name: Create or update sync issue
+        if: ${{ failure() || steps.sync.outputs.needs_attention == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
+          FAILED: ${{ job.status == 'failure' }}
+          SKIPPED: ${{ steps.sync.outputs.skipped }}
         run: |
           set -euo pipefail
 
+          if [ "$FAILED" = "true" ]; then
+            TITLE="[CI] 上游同步失败"
+          else
+            TITLE="[CI] 上游同步跳过提交"
+          fi
+
           {
-            echo "## 上游同步失败"
+            echo "## 上游同步需人工处理"
             echo
             echo "- 运行：$RUN_URL"
             echo "- 同步前提交：\`$SHA\`"
             echo "- 上游：\`PCL-Community/PCL-CE@dev\`"
             echo
-            echo "### 同步日志"
-            echo '```text'
-            tail -c 40000 sync.log 2>/dev/null || echo "（无日志；失败可能发生在 checkout 阶段）"
+            if [ "$FAILED" = "true" ]; then
+              echo "- 同步脚本失败，未推送任何提交。若为 cherry-pick 冲突，请人工处理，"
+              echo "  注意不要引入被剔除的提交。"
+            else
+              echo "- 本次跳过的上游提交数：$SKIPPED（记录于 \`.github/upstream-sync-skipped.txt\`）。"
+              echo "- 跳过的提交不会自动重试，请人工审计后决定是否补入。"
+            fi
             echo
+            echo "### 跳过的上游提交"
+            echo '```text'
+            tail -c 40000 .github/upstream-sync-skipped.txt 2>/dev/null || echo "（无记录）"
             echo '```'
             echo
-            echo "> 本 Issue 由 CI 自动创建 / 更新。同步脚本失败时不会推送任何提交；"
-            echo "> 若为 cherry-pick 冲突，请人工处理，注意不要引入被剔除的提交。"
+            if [ "$FAILED" = "true" ]; then
+              echo "### 同步日志"
+              echo '```text'
+              tail -c 40000 sync.log 2>/dev/null || echo "（无日志；失败可能发生在 checkout 阶段）"
+              echo
+              echo '```'
+              echo
+            fi
+            echo "> 本 Issue 由 CI 自动创建 / 更新。"
           } > report.md
 
           num="$(gh issue list --repo "$REPO" --state open --limit 100 \
             --json number,title \
-            --jq '[.[] | select(.title == "[CI] 上游同步失败")][0].number // empty')"
+            --jq --arg t "$TITLE" '[.[] | select(.title == $t)][0].number // empty')"
           if [[ -n "$num" ]]; then
             gh issue comment "$num" --repo "$REPO" --body-file report.md
           else
-            gh issue create --repo "$REPO" --title "[CI] 上游同步失败" --body-file report.md
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file report.md
           fi
