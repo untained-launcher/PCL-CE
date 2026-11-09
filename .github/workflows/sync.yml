@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: '17 */6 * * *'
   workflow_dispatch:
+    inputs:
+      replay_from:
+        description: "显式重放起点（上游 SHA）。用于按需补放被跳过 / 漏处理的提交，例如 915ac29795ef。留空则按记录的基线同步。"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -33,6 +38,7 @@ jobs:
         env:
           SYNC_GIT_NAME: ${{ vars.SYNC_GIT_NAME }}
           SYNC_GIT_EMAIL: ${{ vars.SYNC_GIT_EMAIL }}
+          FROM: ${{ inputs.replay_from }}
         run: |
           set -o pipefail
           ./scripts/sync-upstream.sh 2>&1 | tee sync.log

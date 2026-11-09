@@ -21,10 +21,14 @@
   它按 `.github/upstream-sync-base` 记录的上游基线逐条 cherry-pick，
   跳过被剔除提交与仅修改 `.github/workflows/` 的上游提交，
   并在推送前运行 `scripts/check-policy.sh`。
-- 若上游后续提交依赖被剔除的代码、或重新引入该功能：冲突落在被剔除功能文件上时
-  取上游版本；其余冲突跳过该提交，记入 `.github/upstream-sync-skipped.txt`
-  并由 CI 开 Issue 通知，同步不再因此停摆。
+- 触及被剔除功能文件或标记的上游提交不整条跳过：先应用，再在「净化」步骤剥掉
+  带入的被剔除内容（fork 的 HEAD 永远不含被剔除内容，暂存区里出现的标记行
+  必然来自本次 cherry-pick），保留提交的正常部分；净化后 `check-policy.sh`
+  仍不过则回退该提交，记入 `.github/upstream-sync-skipped.txt` 并由 CI 开 Issue。
+  冲突裁决：被剔除功能文件保留删除状态；其余冲突段取上游。
   不要为了让 CI 变绿而把该功能加回来。
+- `FROM=<上游 SHA>`（对应 workflow_dispatch 的 `replay_from`）可按需重放，
+  补放被跳过或漏处理的提交；基线仍由脚本推进，不要手工改基线文件。
 - `.github/upstream-sync-base` 是同步状态，只有同步脚本可以更新；不要手工改成别的提交。
 
 ## 2. 匿名是硬性要求
@@ -82,7 +86,7 @@
 
 - `.github/workflows/sync.yml`：每 6 小时 + 手动触发。只拉取上游并按基线 cherry-pick，
   推送后**不再触发构建**；失败，或有上游提交因冲突被跳过时，自动创建 / 更新对应
-  Issue，附运行链接、跳过清单与日志摘录。
+  Issue，附运行链接、跳过清单与日志摘录。手动触发可填 `replay_from` 按需重放。
 - `.github/workflows/build.yml`：PR、手动触发，以及被 `release.yml` 复用调用。
   不再在每次 push `dev` 时构建；先跑策略检查，再矩阵构建 x64 / ARM64。
   失败时自动创建 / 更新 Issue（PR 除外），附失败任务和日志摘录。
