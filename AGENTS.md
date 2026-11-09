@@ -21,8 +21,10 @@
   它按 `.github/upstream-sync-base` 记录的上游基线逐条 cherry-pick，
   跳过被剔除提交与仅修改 `.github/workflows/` 的上游提交，
   并在推送前运行 `scripts/check-policy.sh`。
-- 若上游后续提交依赖被剔除的代码、或重新引入该功能，同步会冲突或被策略检查拦截。
-  此时停止并等待人工处理；不要为了让 CI 变绿而把该功能加回来。
+- 若上游后续提交依赖被剔除的代码、或重新引入该功能：冲突落在被剔除功能文件上时
+  取上游版本；其余冲突跳过该提交，记入 `.github/upstream-sync-skipped.txt`
+  并由 CI 开 Issue 通知，同步不再因此停摆。
+  不要为了让 CI 变绿而把该功能加回来。
 - `.github/upstream-sync-base` 是同步状态，只有同步脚本可以更新；不要手工改成别的提交。
 
 ## 2. 匿名是硬性要求
@@ -79,7 +81,8 @@
 ## 5. CI 结构
 
 - `.github/workflows/sync.yml`：每 6 小时 + 手动触发。只拉取上游并按基线 cherry-pick，
-  推送后**不再触发构建**；失败时自动创建 / 更新 Issue，附运行链接、冲突详情和日志摘录。
+  推送后**不再触发构建**；失败，或有上游提交因冲突被跳过时，自动创建 / 更新对应
+  Issue，附运行链接、跳过清单与日志摘录。
 - `.github/workflows/build.yml`：PR、手动触发，以及被 `release.yml` 复用调用。
   不再在每次 push `dev` 时构建；先跑策略检查，再矩阵构建 x64 / ARM64。
   失败时自动创建 / 更新 Issue（PR 除外），附失败任务和日志摘录。
@@ -115,7 +118,8 @@
 | `scripts/sync-upstream.sh` | 上游同步；跳过被剔除提交 |
 | `scripts/check-policy.sh` | 检查被剔除内容与匿名 trailer |
 | `.github/upstream-sync-base` | 上次同步到的上游提交 |
-| `.github/workflows/sync.yml` | 自动同步 + 失败 Issue |
+| `.github/upstream-sync-skipped.txt` | 同步时因冲突被跳过的上游提交（CI 维护） |
+| `.github/workflows/sync.yml` | 自动同步 + 失败 / 跳过 Issue |
 | `.github/workflows/build.yml` | 自动构建 + 失败 Issue |
 | `.github/workflows/release.yml` | Tag / 手动 / 每周 Nightly 发布 |
 | `cliff.toml` | Release changelog 配置（git-cliff） |
