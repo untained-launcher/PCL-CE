@@ -34,13 +34,16 @@ for path in \
 done
 
 # 3) 源码里不得出现该功能的标记。
-# 只扫描存在的源码目录，避免 AGENTS.md / 脚本 / CI 对提交哈希和文件名的引用导致误报。
+# 扫描所有源码顶层目录：上游重构会新增目录（如 WPF/Core 拆分产生的
+# PCL.Core.Wpf），硬编码目录列表会漏扫。排除 .github / scripts / docs，
+# 它们合法地引用被剔除提交的哈希与文件名，会造成误报。
 grep_paths=()
-for path in 'PCL.Core' 'PCL.Core.Test' 'Plain Craft Launcher 2'; do
-  if git cat-file -e "HEAD:${path}" 2>/dev/null; then
-    grep_paths+=("$path")
-  fi
-done
+while IFS= read -r path; do
+  case "$path" in
+    .github|scripts|docs) continue ;;
+  esac
+  grep_paths+=("$path")
+done < <(git ls-tree -d --name-only HEAD)
 
 if ((${#grep_paths[@]} > 0)); then
   hits="$(git grep -l -E \

@@ -2,13 +2,18 @@
 # 从上游 PCL-Community/PCL-CE 同步 dev 分支。
 #
 # 做法：按 .github/upstream-sync-base 记录的上游基线逐条 cherry-pick，
-# 跳过被剔除的提交和仅修改 GitHub Actions 工作流的上游提交；
 # 推送前运行 scripts/check-policy.sh，失败则不推送。
 #
+# 剔除判定（逐条评估，命中即跳过）：
+#   1. 被剔除提交本身、改动被剔除功能文件的提交；
+#   2. 新增行引入被剔除功能内容（本地化键、调用点等）的提交；
+#   3. 仅修改 .github/workflows/ 的提交（本 fork 使用自己的 CI）。
+#
 # 冲突分级裁决（绝不因单个提交让同步停摆）：
-#   1. 冲突文件属于被剔除功能 -> 冲突段取上游版本；
+#   1. 冲突文件属于被剔除功能 -> 保留删除状态；
 #   2. 其余冲突 -> 跳过整条提交，记入 .github/upstream-sync-skipped.txt
 #      供人工审计，基线照常推进。
+# diff 触及被剔除功能标记的提交，应用后再跑一次策略检查兜底。
 #
 # 用法：
 #   ./scripts/sync-upstream.sh                 # 同步并推送 origin/dev
@@ -25,14 +30,17 @@ SKIPPED_FILE="${SKIPPED_FILE:-.github/upstream-sync-skipped.txt}"
 DRY_RUN="${DRY_RUN:-0}"
 PUSH="${PUSH:-1}"
 
-# 被剔除功能涉及的文件：上游改动这些文件的提交一律跳过；
-# 同步冲突中若出现在这些文件上，冲突段取上游版本。
-# fork 侧不存在这些文件，跟随上游不会引入被剔除功能之外的内容。
+# 被剔除功能涉及的文件：上游改动这些文件的提交一律跳过，
+# 同步冲突中若出现在这些文件上，保留删除状态（fork 侧不存在这些文件）。
 EXCLUDED_FILES=(
   "PCL.Core/App/Region/RegionPolicy.cs"
   "Plain Craft Launcher 2/Modules/Minecraft/RestrictedFeaturePolicy.cs"
   "PCL.Core.Test/RegionPolicyTest.cs"
 )
+# 被剔除功能的内容标记：与 scripts/check-policy.sh 保持一致。
+# 文件检测拦不住只在内容里引用被剔除功能的提交（如本地化键、调用点），
+# 这里把标记检测前移到逐条评估阶段。
+EXCLUDED_PATTERN='RegionPolicy|RestrictedFeaturePolicy|RegionClassification|china-time-zone-and-locale|Region\.Feature\.Restricted|Minecraft 下载、补全与整合包安装功能在你所在的国家或地区不可用'
 SKIPPED_COMMITS=()
 
 ANON_NAME="${SYNC_GIT_NAME:-4sjUnKY3tB7U12}"
@@ -52,19 +60,6 @@ in_list() {
   shift
   for item in "$@"; do [ "$item" = "$needle" ] && return 0; done
   return 1
-}
-
-# 冲突段级取上游：只把 <<<<<<< ======= >>>>>>> 冲突块替换为上游段，
-# 保留文件其余区域的内容。整文件 checkout --theirs 会丢失其他区域的成果。
-take_theirs_hunks() {
-  local file=$1 tmp
-  tmp=$(mktemp)
-  awk '
-    /^<<<<<<</ { in_conflict = 1; take = 0; next }
-    /^=======/ { take = 1; next }
-    /^>>>>>>>/ { in_conflict = 0; take = 0; next }
-    !in_conflict || take { print }
-  ' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
 START_HEAD="$(git rev-parse HEAD)"
@@ -145,6 +140,15 @@ for commit in "${COMMITS[@]}"; do
     continue
   fi
 
+  # 新增行引入被剔除功能的内容（本地化键、调用点等）时跳过：
+  # 文件检测拦不住只在内容里引用被剔除功能的提交。
+  added_lines=$(git show --unified=0 "$commit" | grep '^+' | grep -v '^+++' || true)
+  if grep -qE "$EXCLUDED_PATTERN" <<< "$added_lines"; then
+    log "跳过引入被剔除功能内容的提交 $short $subject"
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
+
   # 本 fork 使用自己的 CI，上游仅改工作流的提交没有同步价值。
   if [[ -n "$changed_paths" ]] && ! grep -qvE '^\.github/workflows/' <<< "$changed_paths"; then
     log "跳过仅修改工作流的上游提交 $short $subject"
@@ -152,17 +156,25 @@ for commit in "${COMMITS[@]}"; do
     continue
   fi
 
+  # diff 触及被剔除功能标记（含纯删除）的提交，应用后再跑一次策略检查，
+  # 防止合并意外把被剔除内容带进 fork。
+  needs_policy_check=0
+  if git show --unified=0 "$commit" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+     | grep -qE "$EXCLUDED_PATTERN"; then
+    needs_policy_check=1
+  fi
+
   log "应用 $short $subject"
   if ! git cherry-pick --no-commit "$commit"; then
-    # 分级裁决：被剔除功能文件的冲突段取上游版本；其余冲突跳过整条提交
+    # 分级裁决：被剔除功能文件的冲突保留删除状态；其余冲突跳过整条提交
     # 并记录到 .github/upstream-sync-skipped.txt，绝不因单个提交停摆。
     conflicts=$(git diff --name-only --diff-filter=U)
     unexpected=0
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       if in_list "$path" "${EXCLUDED_FILES[@]}"; then
-        log "冲突段取上游（被剔除功能文件）: $path"
-        take_theirs_hunks "$path" && git add -- "$path"
+        log "冲突文件属于被剔除功能，保留删除: $path"
+        git rm -q -f --ignore-unmatch -- "$path"
       else
         printf '未预期冲突文件：%s\n' "$path" >&2
         unexpected=1
@@ -188,6 +200,16 @@ for commit in "${COMMITS[@]}"; do
   # 显式关闭签名，避免本机全局 commit.gpgsign=true 把真实密钥带进匿名提交。
   git -c commit.gpgsign=false commit -C "$commit" --no-verify >/dev/null
   APPLIED=$((APPLIED + 1))
+
+  if [ "$needs_policy_check" -eq 1 ]; then
+    if ! ./scripts/check-policy.sh; then
+      log "提交 $short 应用后违反策略，回退并跳过"
+      git reset -q --hard HEAD~1
+      SKIPPED=$((SKIPPED + 1))
+      SKIPPED_COMMITS+=("$commit")
+      continue
+    fi
+  fi
 done
 
 # 即使全部跳过也推进基线，避免每次重复评估同一批提交。
