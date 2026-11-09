@@ -24,7 +24,8 @@ jobs:
   sync:
     name: Sync
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 按需重放可能一次性处理数十个提交（含上游大重构），预留充足时间。
+    timeout-minutes: 45
     steps:
       - name: Checkout dev
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -94,9 +95,10 @@ jobs:
             echo "> 本 Issue 由 CI 自动创建 / 更新。"
           } > report.md
 
+          # gh 的 --jq 不支持 --arg，标题直接内嵌（标题本身不含双引号）。
           num="$(gh issue list --repo "$REPO" --state open --limit 100 \
             --json number,title \
-            --jq --arg t "$TITLE" '[.[] | select(.title == $t)][0].number // empty')"
+            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
           if [[ -n "$num" ]]; then
             gh issue comment "$num" --repo "$REPO" --body-file report.md
           else

@@ -139,6 +139,8 @@ for commit in "${COMMITS[@]}"; do
 
   # 被剔除功能文件 / 标记不再整条跳过：提交的正常部分要进，剔除部分在
   # 应用后的「净化」步骤剥掉。先判断本提交是否需要净化。
+  # 注意：grep -q 会提前退出，在 pipefail 下让上游 grep 收到 SIGPIPE 而
+  # 误判为不匹配；这里先把新增行取到变量，再用 grep -c 计数判断。
   needs_purify=0
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -148,8 +150,9 @@ for commit in "${COMMITS[@]}"; do
     fi
   done <<< "$changed_paths"
   if [ "$needs_purify" -eq 0 ]; then
-    if git show --unified=0 "$commit" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
-       | grep -qE "$EXCLUDED_PATTERN"; then
+    changed_lines=$(git show --unified=0 "$commit" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' || true)
+    hits=$(printf '%s\n' "$changed_lines" | grep -cE "$EXCLUDED_PATTERN" || true)
+    if [ "${hits:-0}" -gt 0 ]; then
       needs_purify=1
     fi
   fi
@@ -166,17 +169,29 @@ for commit in "${COMMITS[@]}"; do
     # 分级裁决：被剔除功能文件的冲突保留删除状态；其余冲突取上游段。
     # fork 的自有内容只在 .github / AGENTS.md / scripts，源码文件没有自有
     # 改动，取上游不会丢 fork 内容，却能让大重构这类提交顺利应用。
+    # modify/delete 场景文件可能不在工作区，此时直接取上游版本。
     conflicts=$(git diff --name-only --diff-filter=U)
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       if in_list "$path" "${EXCLUDED_FILES[@]}"; then
         log "冲突文件属于被剔除功能，保留删除: $path"
         git rm -q -f --ignore-unmatch -- "$path"
-      else
+      elif [ -f "$path" ] && grep -q '^<<<<<<<' "$path"; then
         log "冲突取上游段: $path"
         take_theirs_hunks "$path" && git add -- "$path"
+      else
+        log "冲突文件不在工作区，取上游版本: $path"
+        git checkout --theirs -- "$path" 2>/dev/null && git add -- "$path" \
+          || git rm -q -f --ignore-unmatch -- "$path"
       fi
     done <<< "$conflicts"
+    # 防御：仍有未合并文件时再取一轮上游版本，避免 commit 因 unmerged 失败。
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      log "残留未合并文件，取上游版本: $path"
+      git checkout --theirs -- "$path" 2>/dev/null && git add -- "$path" \
+        || git rm -q -f --ignore-unmatch -- "$path"
+    done < <(git diff --name-only --diff-filter=U)
   fi
 
   if git diff --cached --quiet; then
@@ -195,9 +210,11 @@ for commit in "${COMMITS[@]}"; do
     done
     while IFS= read -r path; do
       [ -n "$path" ] || continue
-      if git show ":${path}" 2>/dev/null | grep -qE "$EXCLUDED_PATTERN"; then
+      staged=$(git show ":${path}" 2>/dev/null || true)
+      hits=$(printf '%s\n' "$staged" | grep -cE "$EXCLUDED_PATTERN" || true)
+      if [ "${hits:-0}" -gt 0 ]; then
         log "剥离 $path 中的被剔除功能标记行"
-        git show ":${path}" | grep -vE "$EXCLUDED_PATTERN" > "$path" || true
+        printf '%s\n' "$staged" | grep -vE "$EXCLUDED_PATTERN" > "$path" || true
         git add -- "$path"
       fi
     done < <(git diff --cached --name-only --diff-filter=ACM)
