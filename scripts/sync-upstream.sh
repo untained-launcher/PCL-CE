@@ -12,6 +12,7 @@
 set -euo pipefail
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-PCL-Community/PCL-CE}"
+UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/${UPSTREAM_REPO}}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-dev}"
 TARGET_BRANCH="${TARGET_BRANCH:-dev}"
 
@@ -51,7 +52,8 @@ git config user.name "${SYNC_GIT_NAME:-PCL-CE Sync}"
 git config user.email "${SYNC_GIT_EMAIL:-you@know.who}"
 git config commit.gpgsign false
 
-git remote add upstream "https://github.com/${UPSTREAM_REPO}" 2>/dev/null || true
+git remote add upstream "$UPSTREAM_URL" 2>/dev/null || true
+git remote set-url upstream "$UPSTREAM_URL"
 git fetch --no-tags upstream "$UPSTREAM_BRANCH"
 
 UPSTREAM_REF="upstream/${UPSTREAM_BRANCH}"
@@ -110,6 +112,11 @@ fi
 # 合并后必须仍然满足本 fork 的硬约束。
 if [[ -x scripts/check-policy.sh ]]; then
   scripts/check-policy.sh
+fi
+
+if [[ "${DRY_RUN:-}" == "true" ]]; then
+  echo "[sync] DRY_RUN：已合并到本地，跳过推送（HEAD $(git rev-parse --short HEAD)）"
+  exit 0
 fi
 
 git push origin "HEAD:${TARGET_BRANCH}"
