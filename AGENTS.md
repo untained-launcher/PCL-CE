@@ -10,7 +10,8 @@
 （`fix(install): 中国大陆地区禁用 Minecraft 安装功能 (#3673)`）
 引入的地区功能限制。
 
-- 该提交不得以 merge、cherry-pick、revert、patch 等任何方式进入历史。
+- 本仓库完整跟随上游历史，该提交以原 SHA 存在于祖先链中；约束落点是**工作树里不得有它引入的实现**，
+  由 `scripts/check-policy.sh` 强制执行。不要为此改写上游历史。
 - 区域检测实现与测试不得存在：
   - `PCL.Core/App/Region/RegionPolicy.cs`
   - `PCL.Core.Test/RegionPolicyTest.cs`
