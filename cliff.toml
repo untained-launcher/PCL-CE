@@ -24,7 +24,6 @@ body = """
 
 ---
 
-[如果你有 Mirror 酱 CDK 可以直接使用此高速下载源](https://mirrorchyan.com/zh/projects?rid=PCL2-CE&source=pcl2ce-gh-release)
 你也可以直接在下方的 Assets 中下载
 
 """
@@ -43,6 +42,8 @@ postprocessors = [
 output = "CHANGELOG.md"
 
 [git]
+# 只把 v* 当成发布 tag；nightly-* 不参与 changelog 的版本范围。
+tag_pattern = "v[0-9]*"
 # Parse commits according to the conventional commits specification.
 # See https://www.conventionalcommits.org
 conventional_commits = true
@@ -64,6 +65,7 @@ commit_preprocessors = [
 # Prevent commits that are breaking from being excluded by commit parsers.
 protect_breaking_commits = false
 commit_parsers = [
+    { message = "^feat\\(bump\\)", skip = true },
     { message = "^feat|^impl", group = "<!-- 0 -->🚀 功能追加" },
     { message = "^fix", group = "<!-- 1 -->🐛 问题修复" },
     { message = "^refactor", group = "<!-- 2 -->🚜 重构" },
@@ -75,6 +77,7 @@ commit_parsers = [
     { message = "^ci", group = "<!-- 6 -->🤖 工作流配置" },
     { message = "^test", skip = true },
     { message = "^chore\\(bump\\)", skip = true },
+    { message = "^chore\\(sync\\)", skip = true },
     { message = "^deps", skip = true },
     { message = "^chore\\(pr\\)", skip = true },
     { message = "^chore\\(pull\\)", skip = true },

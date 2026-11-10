@@ -1,0 +1,307 @@
+name: Release
+
+on:
+  schedule:
+    # 每周两次：周一、周四 03:00 UTC（北京时间 11:00）。
+    - cron: '0 3 * * 1,4'
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v2.15.1 or v2.15.1-beta.1)'
+        required: true
+        type: string
+      configuration:
+        description: 'Build configuration'
+        required: true
+        default: Release
+        type: choice
+        options:
+          - Release
+          - Beta
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: read
+  issues: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for new commits
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Skip scheduled build if HEAD was already released
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" != "schedule" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          last="$(gh run list --repo "$REPO" --workflow release.yml --status success \
+            --limit 50 --json headSha \
+            --jq ".[] | select(.headSha == \"$SHA\") | .headSha" 2>/dev/null \
+            | head -n1 || true)"
+          if [[ -n "$last" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "HEAD $SHA 已成功发布过，跳过本次计划构建。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  prepare:
+    name: Prepare release
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      configuration: ${{ steps.vars.outputs.configuration }}
+      prerelease: ${{ steps.vars.outputs.prerelease }}
+      title: ${{ steps.vars.outputs.title }}
+      asset_label: ${{ steps.vars.outputs.asset_label }}
+    steps:
+      - name: Resolve tag, configuration, and title
+        id: vars
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_CONFIG: ${{ inputs.configuration }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            stamp="$(date -u +%Y%m%d-%H%M%S)"
+            tag="nightly-$stamp"
+            title="Prism-CE nightly ${stamp:0:4}-${stamp:4:2}-${stamp:6:2} ${stamp:9:2}:${stamp:11:2} UTC"
+            config="Beta"
+            pre="true"
+            asset_label="nightly"
+          else
+            tag="${INPUT_TAG:-$REF_NAME}"
+            title="Prism-CE $tag"
+            config="${INPUT_CONFIG:-}"
+            if [[ -z "$config" ]]; then
+              if [[ "$tag" == *beta* || "$tag" == *rc* ]]; then
+                config="Beta"
+              else
+                config="Release"
+              fi
+            fi
+            pre="${INPUT_PRERELEASE:-false}"
+            if [[ "$config" == "Beta" ]]; then
+              pre="true"
+            fi
+            asset_label="$config"
+          fi
+
+          if [[ ! "$tag" =~ ^(v[0-9][0-9A-Za-z._-]*|nightly-[0-9]{8}-[0-9]{6})$ ]]; then
+            echo "::error::Tag must look like v2.15.1, v2.15.1-beta.1, or nightly-YYYYMMDD-HHMMSS."
+            exit 1
+          fi
+          case "$config" in
+            Release|Beta) ;;
+            *) echo "::error::Unsupported configuration: $config"; exit 1 ;;
+          esac
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "configuration=$config" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+          echo "asset_label=$asset_label" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build release artifacts
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      configuration: ${{ needs.prepare.outputs.configuration }}
+    secrets: inherit
+
+  release:
+    name: Publish release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout for tag checks and changelog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: git-cliff
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: PCL2_CE_${{ needs.prepare.outputs.configuration }}_*
+          path: artifacts
+
+      - name: Prepare release assets
+        env:
+          CONFIG: ${{ needs.prepare.outputs.configuration }}
+          ASSET_LABEL: ${{ needs.prepare.outputs.asset_label }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # 拒绝带签名的 annotated tag：匿名发布不绑定真实 GPG / SSH 密钥。
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            if [[ "$(git cat-file -t "refs/tags/$TAG")" == "tag" ]] \
+              && git cat-file -p "refs/tags/$TAG" | sed -n '1,/^$/p' | grep -q '^gpgsig'; then
+              echo "::error::Tag $TAG is signed; anonymous releases must use unsigned tags."
+              exit 1
+            fi
+            tag_sha="$(git rev-list -n1 "refs/tags/$TAG")"
+            if [[ "$tag_sha" != "$SHA" ]]; then
+              echo "::error::Tag $TAG points to $tag_sha, but this run built $SHA."
+              exit 1
+            fi
+          fi
+
+          rm -rf release
+          mkdir -p release
+          for arch in x64 ARM64; do
+            src="artifacts/PCL2_CE_${CONFIG}_${arch}/Plain Craft Launcher 2.exe"
+            dst="release/PCL2_CE_${ASSET_LABEL}_${arch}.exe"
+            if [[ ! -f "$src" ]]; then
+              echo "::error::Missing build artifact: $src"
+              exit 1
+            fi
+            cp "$src" "$dst"
+          done
+          (cd release && sha256sum *.exe > SHA256SUMS)
+
+          # nightly 始终用 --unreleased；v* 已有 tag 用 --latest，新 tag 用 --unreleased。
+          if [[ "$TAG" == nightly-* ]]; then
+            git-cliff --unreleased -o CHANGELOG.md 2>/dev/null || true
+          elif git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            git-cliff --latest -o CHANGELOG.md 2>/dev/null || true
+          else
+            git-cliff --unreleased -o CHANGELOG.md 2>/dev/null || true
+          fi
+
+          {
+            echo "Automated Prism-CE build."
+            echo
+            echo "- Commit: $SHA"
+            echo "- Configuration: $CONFIG"
+            echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            if [[ -s CHANGELOG.md ]]; then
+              echo "## Changelog"
+              echo
+              head -n 500 CHANGELOG.md
+              if [[ "$(wc -l < CHANGELOG.md)" -gt 500 ]]; then
+                echo
+                echo "（changelog 已截断，完整内容见仓库）"
+              fi
+            fi
+          } > release-notes.md
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TITLE: ${{ needs.prepare.outputs.title }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --repo "$REPO" --clobber
+            exit 0
+          fi
+
+          args=(--title "$TITLE" --notes-file release-notes.md)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          if gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            args+=(--verify-tag)
+          else
+            args+=(--target "$SHA")
+          fi
+          gh release create "$TAG" release/* --repo "$REPO" "${args[@]}"
+
+  report:
+    name: Report release failure
+    needs: [check, prepare, build, release]
+    if: failure() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - name: Create or update issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          CONFIG: ${{ needs.prepare.outputs.configuration }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## 自动发布失败"
+            echo
+            echo "- 运行：$RUN_URL"
+            echo "- Tag：\`$TAG\`"
+            echo "- 配置：\`$CONFIG\`"
+            echo
+            echo "### 失败任务"
+            gh run view "$RUN_ID" --repo "$REPO" --json jobs \
+              --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name' 2>/dev/null \
+              || echo "- （无法获取任务列表）"
+            echo
+            echo "### 日志摘录"
+            echo '```text'
+            gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>/dev/null | tail -c 40000 \
+              || echo "（无法获取日志，请打开运行页面）"
+            echo
+            echo '```'
+            echo
+            echo "> 本 Issue 由 CI 自动创建 / 更新；请勿在其中粘贴个人信息。"
+          } > report.md
+
+          num="$(gh issue list --repo "$REPO" --state open --limit 100 \
+            --json number,title \
+            --jq '[.[] | select(.title == "[CI] Release 失败")][0].number // empty')"
+          if [[ -n "$num" ]]; then
+            gh issue comment "$num" --repo "$REPO" --body-file report.md
+          else
+            gh issue create --repo "$REPO" --title "[CI] Release 失败" --body-file report.md
+          fi

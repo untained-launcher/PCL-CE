@@ -1,0 +1,92 @@
+name: Sync upstream
+
+# 需要仓库 Settings -> Actions -> General -> Workflow permissions 允许读写，
+# 并允许 GitHub Actions 推送到 dev；schedule 只会在默认分支上运行。
+#
+# 本 fork 的历史 = 上游历史 + 本 fork 的提交：上游提交以原 SHA 合并进来，
+# 不再逐条重放。冲突只允许出现在本 fork 有意改写的文件上（见
+# scripts/sync-upstream.sh 的三张清单），其余冲突中止并开 Issue。
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream
+        id: sync
+        env:
+          SYNC_GIT_NAME: ${{ vars.SYNC_GIT_NAME }}
+          SYNC_GIT_EMAIL: ${{ vars.SYNC_GIT_EMAIL }}
+        run: |
+          set -o pipefail
+          ./scripts/sync-upstream.sh 2>&1 | tee sync.log
+
+      # 合并失败（真冲突或策略校验不通过）时自动创建 / 更新 Issue，
+      # 附运行链接与日志。仓库需启用 Issues。
+      - name: Create or update sync issue
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TITLE="[CI] 上游同步失败"
+
+          {
+            echo "## 上游同步失败"
+            echo
+            echo "- 运行：$RUN_URL"
+            echo "- 同步前提交：\`$SHA\`"
+            echo "- 上游：\`PCL-Community/PCL-CE@dev\`"
+            echo
+            echo "存在无法按既定策略裁决的冲突，或合并后未通过策略校验。"
+            echo "本次未推送任何提交。处理方式见 \`AGENTS.md\` 第 1 节。"
+            echo
+            echo "### 同步日志"
+            echo '```text'
+            tail -c 40000 sync.log 2>/dev/null || echo "（无日志；失败可能发生在 checkout 阶段）"
+            echo '```'
+            echo
+            echo "> 本 Issue 由 CI 自动创建 / 更新。"
+          } > report.md
+
+          # gh 的 --jq 不支持 --arg，标题直接内嵌（标题本身不含双引号）。
+          num="$(gh issue list --repo "$REPO" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
+          if [[ -n "$num" ]]; then
+            gh issue comment "$num" --repo "$REPO" --body-file report.md
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file report.md
+          fi
+
+      # 合并带入了上游源码改动时，自动构建一次确认仍可编译。
+      - name: Verify build
+        if: ${{ steps.sync.outputs.changed == 'true' }}
+        uses: ./.github/workflows/build.yml
+        with:
+          configuration: CI
